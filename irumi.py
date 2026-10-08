@@ -416,6 +416,12 @@ class Environment:
         raise NameError(f"変数「{name}」が見つかりません。スペルミスがないか確認してください。")
 
     def set(self, name, value):
+        curr = self
+        while curr:
+            if name in curr.bindings:
+                curr.bindings[name] = value
+                return
+            curr = curr.parent
         self.bindings[name] = value
 
     def contains(self, name):
