@@ -282,7 +282,7 @@ def tokenize(code: str):
             # 真偽値
             if w in ('True', '真', 'はい', '正しい'):
                 return [('BOOL', True)]
-            elif w in ('False', '偽', 'いいえ', '違う'):
+            elif w in ('False', '偽', 'いいえ'):
                 return [('BOOL', False)]
 
             return [('IDENT', Symbol(w))]
