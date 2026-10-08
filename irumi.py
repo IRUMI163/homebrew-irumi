@@ -74,7 +74,7 @@ ALIASES = {
 
     # 入出力
     "書く": "書く", "出す": "書く", "表示": "書く", "出力": "書く", "print": "書く",
-    "ログ": "ログ", "記録": "ログ", "残す": "ログ",
+    "ログ": "ログ", "記録": "ログ",
     "聞く": "聞く", "尋ねる": "聞く", "入力": "聞く", "input": "聞く",
     "待つ": "待つ", "待機": "待つ", "sleep": "待つ",
 
@@ -146,13 +146,36 @@ ALIASES = {
 }
 
 def resolve_cmd(cmd_name):
-    return ALIASES.get(cmd_name, cmd_name)
+    if type(cmd_name) is Symbol:
+        return ALIASES.get(cmd_name, cmd_name)
+    return cmd_name
 
 # 自然な助詞のスキップセット
 OPTIONAL_PARTICLES = {"を", "に", "へ", "と", "で", "は", "の"}
 
 def is_particle(x):
-    return isinstance(x, str) and x in OPTIONAL_PARTICLES
+    return type(x) is Symbol and x in OPTIONAL_PARTICLES
+
+def is_block(x):
+    return isinstance(x, list) and len(x) > 0 and all(isinstance(e, list) for e in x)
+
+def as_body(x):
+    return list(x) if is_block(x) else [x]
+
+BUILTIN_COMMANDS = {
+    "足す", "引く", "掛ける", "割る", "余り",
+    "大", "小", "以上", "以下", "等", "違う",
+    "かつ", "または", "ではない",
+    "書く", "ログ", "聞く", "待つ",
+    "定義", "設定", "もし", "順に", "関数", "返す",
+    "繰り返す", "抜ける", "次へ", "試す",
+    "設計図", "生み出す", "呼ぶ",
+    "変換", "絞り込む", "読み込む",
+    "リスト", "長さ", "番目", "追加", "並び替える", "逆順", "消す",
+    "辞書", "取る", "キー一覧", "値一覧",
+    "乱数", "選ぶ", "保存", "読む", "追記", "分ける", "つなぐ",
+    "含む", "置き換える", "数値化", "文字化", "おわり", "いま", "外部呼出"
+}
 
 # 構文キーワード（未定義変数エラーから除外する単語）
 SYNTAX_KEYWORDS = {
@@ -352,9 +375,9 @@ class UserFunction:
         local_env = Environment(parent=self.closure_env)
         for i, p in enumerate(self.params):
             if i < len(arg_values):
-                local_env.set(p, arg_values[i])
+                local_env.define(p, arg_values[i])
             else:
-                local_env.set(p, None)
+                local_env.define(p, None)
         
         result = None
         try:
@@ -377,9 +400,9 @@ class Blueprint:
         inst_env = Environment(parent=self.closure_env)
         for i, p in enumerate(self.params):
             if i < len(arg_values):
-                inst_env.set(p, arg_values[i])
+                inst_env.define(p, arg_values[i])
             else:
-                inst_env.set(p, None)
+                inst_env.define(p, None)
         
         for expr in self.body:
             evaluate(expr, inst_env)
@@ -414,6 +437,10 @@ class Environment:
         if self.parent:
             return self.parent.get(name)
         raise NameError(f"変数「{name}」が見つかりません。スペルミスがないか確認してください。")
+
+    def define(self, name, value):
+        """現スコープに必ず変数を新規作成・束縛する（引数・ループ変数等）"""
+        self.bindings[name] = value
 
     def set(self, name, value):
         curr = self
@@ -473,10 +500,10 @@ def evaluate(node, env: Environment):
 
 
 def _evaluate_list(node, env: Environment):
-    if len(node) > 1 and isinstance(node[0], str):
+    if len(node) > 1 and type(node[0]) is Symbol:
         head_res = resolve_cmd(node[0])
         if head_res in ("もし", "試す"):
-            tail_res = resolve_cmd(node[-1]) if isinstance(node[-1], str) else None
+            tail_res = resolve_cmd(node[-1]) if type(node[-1]) is Symbol else None
             if tail_res != head_res:
                 node = AstList(list(node[1:]) + [node[0]], line_num=getattr(node, "line_num", 1))
 
@@ -484,12 +511,12 @@ def _evaluate_list(node, env: Environment):
     
     # 命令が自作関数や設計図の場合
     cmd_candidate = raw_cmd
-    if isinstance(raw_cmd, str) and env.contains(raw_cmd):
+    if type(raw_cmd) is Symbol and env.contains(raw_cmd):
         val = env.get(raw_cmd)
         if isinstance(val, (UserFunction, Blueprint)):
             cmd_candidate = val
 
-    cmd = resolve_cmd(cmd_candidate) if isinstance(cmd_candidate, str) else cmd_candidate
+    cmd = resolve_cmd(cmd_candidate) if type(cmd_candidate) is Symbol else cmd_candidate
     raw_args = node[:-1]
 
     # --------------------------------------------------
@@ -530,7 +557,7 @@ def _evaluate_list(node, env: Environment):
     # 特殊構文 2: 条件分岐 (もし)
     # --------------------------------------------------
     if cmd == "もし":
-        cleaned_args = [a for a in raw_args if a not in ("もし", "なら", "ちがえば", "そうでなければ", "else")]
+        cleaned_args = [a for a in raw_args if not (type(a) is Symbol and a in ("もし", "なら", "ちがえば", "そうでなければ", "else"))]
         if len(cleaned_args) < 2:
             raise ValueError("『もし』には「条件式」と「合致したときの処理」が必要です。")
 
@@ -577,10 +604,11 @@ def _evaluate_list(node, env: Environment):
             raise ValueError("関数には「引数」と「処理内容」が必要です。")
 
         params = params_expr if isinstance(params_expr, list) else [params_expr]
-        if len(args) >= 3 and len(args[2:]) == 1 and isinstance(args[2], list) and (len(args[2]) > 0 and isinstance(args[2][0], list)):
-            body = args[2]
+        if len(args) == 2:
+            body = as_body(body_expr)
         else:
-            body = body_expr if isinstance(body_expr, list) else [body_expr]
+            raw_body = args[2] if len(args) == 3 else args[2:]
+            body = as_body(raw_body)
 
         fn = UserFunction(fn_name, params, body, env)
         if len(args) >= 3:
@@ -597,10 +625,8 @@ def _evaluate_list(node, env: Environment):
         body_expr = args[2:] if len(args) >= 3 else []
 
         params = params_expr if isinstance(params_expr, list) else [params_expr]
-        if len(body_expr) == 1 and isinstance(body_expr[0], list) and body_expr[0] and isinstance(body_expr[0][0], list):
-            body = body_expr[0]
-        else:
-            body = body_expr
+        raw_body = body_expr[0] if len(body_expr) == 1 else body_expr
+        body = as_body(raw_body)
 
         bp = Blueprint(class_name, params, body, env)
         env.set(class_name, bp)
@@ -638,17 +664,26 @@ def _evaluate_list(node, env: Environment):
     if cmd == "繰り返す":
         args = raw_args
 
+        def _has_kw(kw):
+            return any(type(a) is Symbol and a == kw for a in args)
+
+        def _index_kw(kw):
+            for i, a in enumerate(args):
+                if type(a) is Symbol and a == kw:
+                    return i
+            return -1
+
         # 範囲ループ (〜から〜まで)
-        if "から" in args and "まで" in args:
-            from_idx = args.index("から")
-            to_idx = args.index("まで")
+        if _has_kw("から") and _has_kw("まで"):
+            from_idx = _index_kw("から")
+            to_idx = _index_kw("まで")
             start_val = int(evaluate(args[from_idx - 1], env))
             end_val = int(evaluate(args[to_idx - 1], env))
             
             rest_args = args[to_idx + 1:]
             var_name = "番号"
-            if "各" in rest_args:
-                k_idx = rest_args.index("各")
+            if any(type(a) is Symbol and a == "各" for a in rest_args):
+                k_idx = [i for i, a in enumerate(rest_args) if type(a) is Symbol and a == "各"][0]
                 var_name = rest_args[k_idx + 1]
                 body_expr = rest_args[k_idx + 2]
             elif len(rest_args) >= 2 and isinstance(rest_args[0], str):
@@ -657,12 +692,12 @@ def _evaluate_list(node, env: Environment):
             else:
                 body_expr = rest_args[0]
 
-            body_list = body_expr if (isinstance(body_expr, list) and body_expr and isinstance(body_expr[0], list)) else [body_expr]
+            body_list = as_body(body_expr)
 
             step = 1 if start_val <= end_val else -1
             last_res = None
             for cur in range(start_val, end_val + step, step):
-                env.set(var_name, cur)
+                env.define(var_name, cur)
                 try:
                     for stmt in body_list:
                         last_res = evaluate(stmt, env)
@@ -673,16 +708,16 @@ def _evaluate_list(node, env: Environment):
             return last_res
 
         # リスト巡回 (foreach)
-        if "の各要素を" in args or "各要素" in args:
-            idx_kw = args.index("の各要素を") if "の各要素を" in args else args.index("各要素")
+        if _has_kw("の各要素を") or _has_kw("各要素"):
+            idx_kw = _index_kw("の各要素を") if _has_kw("の各要素を") else _index_kw("各要素")
             list_target = evaluate(args[0], env)
             item_var_name = args[idx_kw + 1]
             body_expr = args[idx_kw + 2]
-            body_list = body_expr if (isinstance(body_expr, list) and body_expr and isinstance(body_expr[0], list)) else [body_expr]
+            body_list = as_body(body_expr)
 
             last_res = None
             for item in list_target:
-                env.set(item_var_name, item)
+                env.define(item_var_name, item)
                 try:
                     for stmt in body_list:
                         last_res = evaluate(stmt, env)
@@ -693,11 +728,11 @@ def _evaluate_list(node, env: Environment):
             return last_res
 
         # 条件ループ (while)
-        if "間" in args or "あいだ" in args:
-            idx_kw = args.index("間") if "間" in args else args.index("あいだ")
+        if _has_kw("間") or _has_kw("あいだ"):
+            idx_kw = _index_kw("間") if _has_kw("間") else _index_kw("あいだ")
             cond_expr = args[0]
             body_expr = args[idx_kw + 1]
-            body_list = body_expr if (isinstance(body_expr, list) and body_expr and isinstance(body_expr[0], list)) else [body_expr]
+            body_list = as_body(body_expr)
 
             last_res = None
             while bool(evaluate(cond_expr, env)):
@@ -713,7 +748,7 @@ def _evaluate_list(node, env: Environment):
         # 回数ループ (for N times)
         count_val = evaluate(args[0], env)
         body_expr = args[1]
-        body_list = body_expr if (isinstance(body_expr, list) and body_expr and isinstance(body_expr[0], list)) else [body_expr]
+        body_list = as_body(body_expr)
 
         last_res = None
         for _ in range(int(count_val)):
@@ -804,7 +839,7 @@ def _evaluate_list(node, env: Environment):
         res_list = []
         for item in list_target:
             item_env = Environment(parent=env)
-            item_env.set(var_param, item)
+            item_env.define(var_param, item)
             val = evaluate(body_expr, item_env)
             if cmd == "変換":
                 res_list.append(val)
@@ -838,12 +873,33 @@ def _evaluate_list(node, env: Environment):
             raise FileNotFoundError(f"ファイルまたはPythonモジュール「{target}」が見つかりませんでした。")
 
     # --------------------------------------------------
-    # 自作関数 / 設計図の実行
+    # 自作関数 / 設計図の実行・未定義チェック
     # --------------------------------------------------
     if isinstance(cmd, UserFunction):
         clean_args = [a for a in raw_args if not is_particle(a)]
         eval_args = [evaluate(a, env) for a in clean_args]
         return cmd.call(eval_args)
+
+    if isinstance(cmd, Blueprint):
+        raise TypeError(f"設計図「{cmd.name}」は直接実行できません。「生み出す」を使ってください。")
+
+    if type(raw_cmd) is Symbol and not env.contains(raw_cmd) and cmd not in BUILTIN_COMMANDS:
+        raise RuntimeError(f"命令「{raw_cmd}」の意味がわかりませんでした。スペルやエイリアスを確認してください。")
+
+    # --- 短絡論理演算 (かつ / または) ---
+    if cmd == "かつ":
+        clean_args = [a for a in raw_args if not is_particle(a)]
+        for a in clean_args:
+            if not bool(evaluate(a, env)):
+                return False
+        return True
+
+    if cmd == "または":
+        clean_args = [a for a in raw_args if not is_particle(a)]
+        for a in clean_args:
+            if bool(evaluate(a, env)):
+                return True
+        return False
 
     # --------------------------------------------------
     # 通常組み込み関数の実行
@@ -1069,7 +1125,18 @@ def _evaluate_list(node, env: Environment):
         return sep.join(str(x) for x in target_list)
 
     elif cmd == "含む":
-        return str(eval_args[1]) in str(eval_args[0])
+        target = eval_args[0]
+        item = eval_args[1]
+        if isinstance(target, (list, tuple, set)):
+            return item in target
+        elif isinstance(target, dict):
+            return item in target
+        elif isinstance(target, str):
+            return str(item) in target
+        try:
+            return item in target
+        except Exception:
+            return False
 
     elif cmd == "置き換える":
         return str(eval_args[0]).replace(str(eval_args[1]), str(eval_args[2]))
@@ -1109,11 +1176,8 @@ def _evaluate_list(node, env: Environment):
         return py_fn(*call_args)
 
     else:
-        # 末尾が命令でない場合はデータリストとして解釈
-        try:
-            return [evaluate(x, env) for x in node]
-        except Exception:
-            raise RuntimeError(f"命令「{raw_cmd}」の意味がわかりませんでした。スペルやエイリアスを確認してください。")
+        # 末尾が命令でない値（数値・文字列等）の場合は、二重評価せずにデータリストとして返す
+        return eval_args + [evaluate(raw_cmd, env)]
 
 
 # ==========================================
