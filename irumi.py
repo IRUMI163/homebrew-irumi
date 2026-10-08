@@ -473,6 +473,13 @@ def evaluate(node, env: Environment):
 
 
 def _evaluate_list(node, env: Environment):
+    if len(node) > 1 and isinstance(node[0], str):
+        head_res = resolve_cmd(node[0])
+        if head_res in ("もし", "試す"):
+            tail_res = resolve_cmd(node[-1]) if isinstance(node[-1], str) else None
+            if tail_res != head_res:
+                node = AstList(list(node[1:]) + [node[0]], line_num=getattr(node, "line_num", 1))
+
     raw_cmd = node[-1]
     
     # 命令が自作関数や設計図の場合
