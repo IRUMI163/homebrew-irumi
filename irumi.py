@@ -517,7 +517,7 @@ def _evaluate_list(node, env: Environment):
     # 特殊構文 2: 条件分岐 (もし)
     # --------------------------------------------------
     if cmd == "もし":
-        cleaned_args = [a for a in raw_args if a not in ("なら", "ちがえば", "そうでなければ", "else")]
+        cleaned_args = [a for a in raw_args if a not in ("もし", "なら", "ちがえば", "そうでなければ", "else")]
         if len(cleaned_args) < 2:
             raise ValueError("『もし』には「条件式」と「合致したときの処理」が必要です。")
 
@@ -525,11 +525,19 @@ def _evaluate_list(node, env: Environment):
         then_expr = cleaned_args[1]
         else_expr = cleaned_args[2] if len(cleaned_args) >= 3 else None
 
+        def _eval_block(expr):
+            if isinstance(expr, list) and expr and all(isinstance(x, list) for x in expr):
+                res = None
+                for sub in expr:
+                    res = evaluate(sub, env)
+                return res
+            return evaluate(expr, env)
+
         cond_res = evaluate(cond_expr, env)
         if bool(cond_res):
-            return evaluate(then_expr, env)
+            return _eval_block(then_expr)
         else:
-            return evaluate(else_expr, env) if else_expr is not None else None
+            return _eval_block(else_expr) if else_expr is not None else None
 
     # --------------------------------------------------
     # 特殊構文 3: 順次実行 (順に / まとめて / 実行)
@@ -879,9 +887,19 @@ def _evaluate_list(node, env: Environment):
     elif cmd == "以下":
         return eval_args[0] <= eval_args[1]
     elif cmd == "等":
-        return eval_args[0] == eval_args[1]
+        a, b = eval_args[0], eval_args[1]
+        if a == b:
+            return True
+        if isinstance(a, (int, float, str)) and isinstance(b, (int, float, str)):
+            return str(a) == str(b)
+        return False
     elif cmd == "違う":
-        return eval_args[0] != eval_args[1]
+        a, b = eval_args[0], eval_args[1]
+        if a == b:
+            return False
+        if isinstance(a, (int, float, str)) and isinstance(b, (int, float, str)):
+            return str(a) != str(b)
+        return True
 
     # --- 論理演算 ---
     elif cmd == "かつ":
