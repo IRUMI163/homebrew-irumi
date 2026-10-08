@@ -733,34 +733,49 @@ def _evaluate_list(node, env: Environment):
         fail_kw = "失敗したら" if "失敗したら" in args else ("エラーなら" if "エラーなら" in args else None)
         finally_kw = "かならず" if "かならず" in args else ("必ず" if "必ず" in args else ("最後に" if "最後に" in args else None))
 
-        try_expr = args[0]
-        catch_expr = None
-        finally_expr = None
+        def _eval_block(expr):
+            if isinstance(expr, list) and expr and all(isinstance(x, list) for x in expr):
+                res = None
+                for sub in expr:
+                    res = evaluate(sub, env)
+                return res
+            return evaluate(expr, env)
 
-        if fail_kw:
-            f_idx = args.index(fail_kw)
-            if finally_kw and args.index(finally_kw) > f_idx:
-                fin_idx = args.index(finally_kw)
-                catch_expr = args[f_idx + 1]
-                finally_expr = args[fin_idx + 1]
-            else:
-                catch_expr = args[f_idx + 1]
-        elif finally_kw:
-            fin_idx = args.index(finally_kw)
-            finally_expr = args[fin_idx + 1]
+        f_idx = args.index(fail_kw) if fail_kw else None
+        fin_idx = args.index(finally_kw) if finally_kw else None
+
+        first_kw_idx = f_idx if f_idx is not None else fin_idx
+        if first_kw_idx is not None:
+            try_parts = args[:first_kw_idx]
+        else:
+            try_parts = args
+        try_expr = try_parts if len(try_parts) > 1 else (try_parts[0] if try_parts else None)
+
+        catch_expr = None
+        if f_idx is not None:
+            end_c_idx = fin_idx if fin_idx is not None and fin_idx > f_idx else len(args)
+            c_parts = [a for a in args[f_idx + 1:end_c_idx] if not (isinstance(a, str) and a in ("エラー", "例外"))]
+            catch_expr = c_parts if len(c_parts) > 1 else (c_parts[0] if c_parts else None)
+
+        finally_expr = None
+        if fin_idx is not None:
+            fin_parts = args[fin_idx + 1:]
+            finally_expr = fin_parts if len(fin_parts) > 1 else (fin_parts[0] if fin_parts else None)
 
         try:
             try:
-                return evaluate(try_expr, env)
+                return _eval_block(try_expr) if try_expr is not None else None
+            except (ReturnSignal, BreakSignal, ContinueSignal):
+                raise
             except Exception as e:
                 if catch_expr is not None:
                     env.set("エラー内容", str(e))
-                    return evaluate(catch_expr, env)
+                    return _eval_block(catch_expr)
                 else:
                     raise e
         finally:
             if finally_expr is not None:
-                evaluate(finally_expr, env)
+                _eval_block(finally_expr)
 
     # --------------------------------------------------
     # 特殊構文 8: 一括変換 (map) & 絞り込み (filter)
