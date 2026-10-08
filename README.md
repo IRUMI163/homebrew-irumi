@@ -63,7 +63,7 @@ brew install irumi
 #### インストールの確認
 ```bash
 irumi -v
-# => IRUMI v0.1.1
+# => IRUMI v1.0.0
 ```
 
 ### 2. 手動インストール / Git
@@ -387,7 +387,7 @@ IRUMI はエディタ拡張機能を提供しています。
 ### インストール方法
 ターミナルからインストールできます：
 ```bash
-code --install-extension irumi-language-0.1.1.vsix
+code --install-extension irumi-language-1.0.0.vsix
 ```
 *Antigravity IDE の場合は、拡張機能タブの「…」から「VSIX からのインストール」を選択してください。*
 
