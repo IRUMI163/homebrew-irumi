@@ -47,7 +47,7 @@ IRUMI（イルミ）は、**「人間が頭の中で考える順番のままコ�
 
 ## インストール方法
 
-### 1. Homebrew (macOS)
+### 1. Homebrew (macOS / Linux)
 Homebrew をお使いの場合、ターミナルで以下のコマンドを実行するだけでインストールできます：
 
 ```bash
@@ -60,18 +60,38 @@ brew tap IRUMI163/irumi
 brew install irumi
 ```
 
+### 2. Windows (PowerShell ワンライナー)
+Windows の場合は、PowerShell で以下の1行を実行するだけで自動インストールされ、環境変数 PATH も設定されます：
+
+```powershell
+irm https://raw.githubusercontent.com/IRUMI163/homebrew-irumi/main/install.ps1 | iex
+```
+
+### 3. Python pip を使う方法 (Windows / macOS / Linux 共通)
+Python 3 がインストールされている環境であれば、`pip` を使って一発でインストールできます（`irumi` コマンドが自動登録されます）：
+
+```bash
+pip install git+https://github.com/IRUMI163/homebrew-irumi.git
+```
+
+### 4. 手動インストール / Git
+```bash
+git clone https://github.com/IRUMI163/homebrew-irumi.git
+cd homebrew-irumi
+
+# macOS / Linux の場合:
+chmod +x irumi
+# パスの通った場所に配置（例: ~/.cargo/bin や /usr/local/bin）
+
+# Windows の場合:
+# カレントディレクトリで irumi.cmd をそのまま実行、または PATH に追加
+.\irumi.cmd main.ir
+```
+
 #### インストールの確認
 ```bash
 irumi -v
 # => IRUMI v1.0.1
-```
-
-### 2. 手動インストール / Git
-```bash
-git clone https://github.com/IRUMI163/homebrew-irumi.git
-cd homebrew-irumi
-chmod +x irumi
-# パスの通った場所に配置（例: ~/.cargo/bin や /usr/local/bin）
 ```
 
 ---

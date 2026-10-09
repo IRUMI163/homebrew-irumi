@@ -113,6 +113,21 @@ IRUMI は **SOV（日本語語順: 目的語 ➔ 動詞）** で動作します�
 
 ## 🚀 使い方・実行方法
 
+### 1. IRUMI 本体のインストール
+* **macOS / Linux (Homebrew)**:
+  ```bash
+  brew install IRUMI163/irumi/irumi
+  ```
+* **Windows (PowerShell)**:
+  ```powershell
+  irm https://raw.githubusercontent.com/IRUMI163/homebrew-irumi/main/install.ps1 | iex
+  ```
+* **Windows / macOS / Linux 共通 (Python pip)**:
+  ```bash
+  pip install git+https://github.com/IRUMI163/homebrew-irumi.git
+  ```
+
+### 2. コードの作成と実行
 1. VS Code で `.ir` または `.irumi` ファイル（例: `main.ir`）を作成・編集します。
 2. 日本語で自然にコードを記述します。
 3. ターミナルで実行します：
