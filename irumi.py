@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-IRUMI (イルミ) 言語インタプリタ - 第5版
+IRUMI (イルミ) 言語インタプリタ - 第6版
 日本語語順 (SOV: 目的語 -> 動詞) で書ける、誰でも10分でわかるフル機能スクリプト言語
 - 行番号付き親切エラー表示
 - スペース不要の日本語トークナイズ
 - 未定義変数の安全チェック
+- 堅牢なインポートシステム（循環参照防止・探索パス表示）
+- 安全モード（危険機能無効化: 外部呼出・OSモジュール・ファイルI/O遮断）
+- 数学演算・標準関数の拡充
+- 複数代入・分割代入・辞書リテラル拡張
+- REPL (対話モード) の堅牢化と出力整形
 """
 
 import sys
@@ -23,8 +28,9 @@ except ImportError:
     pass
 
 
+
 # ==========================================
-# 0. 特殊シグナル例外とASTノード
+# 0. 特殊シグナル例外・ASTノード
 # ==========================================
 class ReturnSignal(Exception):
     def __init__(self, value):
@@ -48,16 +54,66 @@ class Symbol(str):
 
 
 # ==========================================
+# 0B. インポート管理と安全モード
+# ==========================================
+IMPORT_STACK = []
+
+def get_search_candidates(target: str):
+    search_dirs = []
+    if IMPORT_STACK:
+        current_file_dir = os.path.dirname(os.path.abspath(IMPORT_STACK[-1]))
+        if current_file_dir and current_file_dir not in search_dirs:
+            search_dirs.append(current_file_dir)
+    cwd = os.getcwd()
+    if cwd not in search_dirs:
+        search_dirs.append(cwd)
+
+    if target.endswith(".ir"):
+        target_vars = [target]
+    else:
+        target_vars = [target, target + ".ir"]
+
+    candidates = []
+    for d in search_dirs:
+        for v in target_vars:
+            cand = os.path.normpath(os.path.join(d, v))
+            if cand not in candidates:
+                candidates.append(cand)
+
+    return candidates
+
+def resolve_import_path(target: str):
+    candidates = get_search_candidates(target)
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+def is_dunder(name: str) -> bool:
+    s = str(name)
+    return s.startswith("__") and s.endswith("__")
+
+def is_safe_mode_active() -> bool:
+    return os.environ.get("IRUMI_SAFE", "0") in ("1", "true", "True") or "--safe" in sys.argv
+
+
+# ==========================================
 # 1. 命令エイリアスマップ & 助詞定義
 # ==========================================
 ALIASES = {
-    # 算術・結合（数値の加算も、文字・リストの結合もすべて「足す」に統合）
+    # 算術・結合
     "+": "足す", "足": "足す", "たす": "足す", "足す": "足す",
     "結合": "足す", "合体": "足す", "くっつける": "足す", "つなげる": "足す",
     "-": "引く", "引": "引く", "ひく": "引く", "引く": "引く",
     "*": "掛ける", "掛": "掛ける", "かける": "掛ける", "掛ける": "掛ける", "×": "掛ける",
     "/": "割る", "割": "割る", "わる": "割る", "割る": "割る", "÷": "割る",
     "%": "余り", "あまり": "余り", "余り": "余り",
+    "//": "整除", "整除": "整除",
+    "^": "べき乗", "**": "べき乗", "べき乗": "べき乗",
+    "絶対値": "絶対値", "abs": "絶対値",
+    "四捨五入": "四捨五入", "round": "四捨五入",
+    "最大": "最大", "max": "最大",
+    "最小": "最小", "min": "最小",
 
     # 比較
     ">": "大", "大きい": "大", "より大きい": "大", "大": "大",
@@ -65,6 +121,7 @@ ALIASES = {
     ">=": "以上", "以上": "以上",
     "<=": "以下", "以下": "以下",
     "==": "等", "同じ": "等", "等しい": "等", "等": "等",
+    "===": "厳密等", "厳密等": "厳密等", "厳密に等しい": "厳密等",
     "!=": "違う", "異": "違う", "等しくない": "違う", "違う": "違う",
 
     # 論理
@@ -150,7 +207,6 @@ def resolve_cmd(cmd_name):
         return ALIASES.get(cmd_name, cmd_name)
     return cmd_name
 
-# 自然な助詞のスキップセット
 OPTIONAL_PARTICLES = {"を", "に", "へ", "と", "で", "は", "の"}
 
 def is_particle(x):
@@ -163,8 +219,8 @@ def as_body(x):
     return list(x) if is_block(x) else [x]
 
 BUILTIN_COMMANDS = {
-    "足す", "引く", "掛ける", "割る", "余り",
-    "大", "小", "以上", "以下", "等", "違う",
+    "足す", "引く", "掛ける", "割る", "余り", "整除", "べき乗", "絶対値", "四捨五入", "最大", "最小",
+    "大", "小", "以上", "以下", "等", "厳密等", "違う",
     "かつ", "または", "ではない",
     "書く", "ログ", "聞く", "待つ",
     "定義", "設定", "もし", "順に", "関数", "返す",
@@ -177,7 +233,6 @@ BUILTIN_COMMANDS = {
     "含む", "置き換える", "数値化", "文字化", "おわり", "いま", "外部呼出"
 }
 
-# 構文キーワード（未定義変数エラーから除外する単語）
 SYNTAX_KEYWORDS = {
     "なら", "ちがえば", "そうでなければ", "else", "間", "あいだ", "各",
     "失敗したら", "エラーなら", "かならず", "必ず", "最後に",
@@ -186,13 +241,9 @@ SYNTAX_KEYWORDS = {
 
 
 # ==========================================
-# 2. 字句解析 (Tokenizer - スペース不要対応＆行番号追跡)
+# 2. 字句解析 (Tokenizer)
 # ==========================================
 def tokenize(code: str):
-    """
-    ソースコードを行番号つきトークンのリストに分解します。
-    スペースを空けずに書いた日本語（例: ”こんにちは”を書く / 10に20を足す）も自動で正しく分割します。
-    """
     tokens = []
     i = 0
     n = len(code)
@@ -213,12 +264,12 @@ def tokenize(code: str):
                 i += 1
             continue
             
-        # 空白文字 (全角スペース含む)
+        # 空白文字
         if ch in (' ', '\t', '\r', '\u3000'):
             i += 1
             continue
             
-        # カッコ (全角・半角両対応)
+        # カッコ
         if ch in ('(', '（'):
             tokens.append(('(', '(', line_num))
             i += 1
@@ -228,12 +279,13 @@ def tokenize(code: str):
             i += 1
             continue
             
-        # 文字列リテラル (半角 " または 全角 ” “)
+        # 文字列リテラル
         if ch in ('"', '”', '“'):
             quote_char = ch
             str_val = []
             str_start_line = line_num
             i += 1
+            closed = False
             while i < n:
                 c = code[i]
                 if c == '\n':
@@ -250,9 +302,12 @@ def tokenize(code: str):
                     continue
                 if (quote_char in ('"',) and c == '"') or (quote_char in ('”', '“') and c in ('”', '“')):
                     i += 1
+                    closed = True
                     break
                 str_val.append(c)
                 i += 1
+            if not closed:
+                raise SyntaxError(f"{str_start_line}行目: 閉じられていない文字列リテラルがあります。末尾に「\"」または「”」を付けてください。")
             tokens.append(('STR', "".join(str_val), str_start_line))
             continue
             
@@ -265,11 +320,16 @@ def tokenize(code: str):
             i += 1
         raw_word = code[start:i]
         
-        # NFKC正規化 (全角数字・英字を半角へ)
+        # NFKC正規化
         norm_word = unicodedata.normalize('NFKC', raw_word)
         
-        # 単語の安全な自動分割（助詞境界でのみ分割）
         def split_norm_word(w):
+            # 記号系（コロン、アロー）
+            if w in (':', '：'):
+                return [('IDENT', Symbol(':'))]
+            if w in ('=>', '->'):
+                return [('IDENT', Symbol(w))]
+
             # 純粋な数値判定
             try:
                 if '.' in w:
@@ -285,7 +345,13 @@ def tokenize(code: str):
                 except ValueError:
                     pass
 
-            # 数字 + 助詞 (例: 10に / 10に20を足す / 1から / 5まで)
+            # 真偽値
+            if w in ('True', '真', 'はい', '正しい'):
+                return [('BOOL', True)]
+            elif w in ('False', '偽', 'いいえ'):
+                return [('BOOL', False)]
+
+            # 数字 + 助詞 (例: 10に / 1から)
             m_num = re.match(r'^([0-9]+(?:\.[0-9]+)?)(に|を|から|まで|へ|と|で)(.*)$', w)
             if m_num:
                 n_str, p_str, r_str = m_num.groups()
@@ -295,18 +361,26 @@ def tokenize(code: str):
                     res.extend(split_norm_word(r_str))
                 return res
 
-            # 助詞 + 命令 (例: を書く -> を, 書く / に足す -> に, 足す)
+            # 助詞 + 命令 (例: を書く -> を, 書く)
             if len(w) >= 2 and w[0] in ('を', 'に', 'へ', 'と', 'で'):
                 p_lead = w[0]
                 rest = w[1:]
                 if rest in ALIASES or rest in ALIASES.values():
                     return [('IDENT', Symbol(p_lead)), ('IDENT', Symbol(rest))]
 
-            # 真偽値
-            if w in ('True', '真', 'はい', '正しい'):
-                return [('BOOL', True)]
-            elif w in ('False', '偽', 'いいえ'):
-                return [('BOOL', False)]
+            # コロン終端 (例: 名前: -> 名前, :)
+            if len(w) >= 2 and (w.endswith(':') or w.endswith('：')):
+                prefix = w[:-1]
+                return [('IDENT', Symbol(prefix)), ('IDENT', Symbol(':'))]
+
+            # 助詞終端 (例: 空に -> 空, に / 無を -> 無, を)
+            m_part = re.match(r'^(None|無|空)(に|を|から|まで|へ|と|で)(.*)$', w)
+            if m_part:
+                k_str, p_str, r_str = m_part.groups()
+                res = [('IDENT', Symbol(k_str)), ('IDENT', Symbol(p_str))]
+                if r_str:
+                    res.extend(split_norm_word(r_str))
+                return res
 
             return [('IDENT', Symbol(w))]
 
@@ -317,12 +391,9 @@ def tokenize(code: str):
 
 
 # ==========================================
-# 3. 構文解析 (Parser - 行番号付きAST生成)
+# 3. 構文解析 (Parser)
 # ==========================================
 def parse(tokens):
-    """
-    トークン列を行番号情報付きのAstListに変換します。
-    """
     if not tokens:
         return []
 
@@ -343,12 +414,12 @@ def parse(tokens):
             while idx < len(tokens) and tokens[idx][0] != ')':
                 lst.append(parse_expr())
             if idx >= len(tokens):
-                raise SyntaxError(f"{tok_line}行目: 閉じカッコ ')' または '）' が足りません！")
+                raise SyntaxError(f"{tok_line}行目: 対応する閉じカッコ ')' または '）' がありません。カッコが正しく閉じられているか確認してください。")
             idx += 1  # ')' を消費
             return lst
         elif tag == ')':
             raise SyntaxError(
-                f"{tok_line}行目: 余分な閉じカッコ ')' または '）' があります！\n"
+                f"{tok_line}行目: 対応する開きカッコのない余分な閉じカッコ ')' または '）' があります！\n"
                 f"💡 ヒント: 自動補完などで末尾の閉じカッコが2重「）））」になっていないか確認してください。"
             )
         else:
@@ -371,13 +442,14 @@ class UserFunction:
         self.body = body
         self.closure_env = closure_env
 
-    def call(self, arg_values):
+    def call(self, arg_values, name=None):
+        disp_name = name or self.name
+        if len(arg_values) != len(self.params):
+            raise TypeError(f"命令『{disp_name}』には引数が{len(self.params)}個必要ですが、{len(arg_values)}個しか渡されていません。")
+
         local_env = Environment(parent=self.closure_env)
         for i, p in enumerate(self.params):
-            if i < len(arg_values):
-                local_env.define(p, arg_values[i])
-            else:
-                local_env.define(p, None)
+            local_env.define(p, arg_values[i])
         
         result = None
         try:
@@ -396,13 +468,15 @@ class Blueprint:
         self.body = body
         self.closure_env = closure_env
 
-    def instantiate(self, arg_values):
-        inst_env = Environment(parent=self.closure_env)
+    def instantiate(self, arg_values, name=None):
+        disp_name = name or self.name
+        if len(arg_values) != len(self.params):
+            raise TypeError(f"命令『{disp_name}』には引数が{len(self.params)}個必要ですが、{len(arg_values)}個しか渡されていません。")
+
+        # インスタンス専用の環境を作成
+        inst_env = Environment(parent=self.closure_env, is_instance_env=True)
         for i, p in enumerate(self.params):
-            if i < len(arg_values):
-                inst_env.define(p, arg_values[i])
-            else:
-                inst_env.define(p, None)
+            inst_env.define(p, arg_values[i])
         
         for expr in self.body:
             evaluate(expr, inst_env)
@@ -427,9 +501,22 @@ class Instance:
 
 
 class Environment:
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, safe_mode=None, is_instance_env=False):
         self.bindings = {}
         self.parent = parent
+        self.is_instance_env = is_instance_env
+        if safe_mode is not None:
+            self.safe_mode = safe_mode
+        elif parent is not None:
+            self.safe_mode = parent.safe_mode
+        else:
+            self.safe_mode = is_safe_mode_active()
+
+        # デフォルトで空/無/NoneをNoneとして定義
+        if parent is None:
+            self.bindings["None"] = None
+            self.bindings["無"] = None
+            self.bindings["空"] = None
 
     def get(self, name):
         if name in self.bindings:
@@ -439,13 +526,16 @@ class Environment:
         raise NameError(f"変数「{name}」が見つかりません。スペルミスがないか確認してください。")
 
     def define(self, name, value):
-        """現スコープに必ず変数を新規作成・束縛する（引数・ループ変数等）"""
         self.bindings[name] = value
 
     def set(self, name, value):
         curr = self
         while curr:
             if name in curr.bindings:
+                curr.bindings[name] = value
+                return
+            # インスタンス環境境界に到達した場合、グローバル変数を汚染せずインスタンスフィールドとして束縛
+            if curr.is_instance_env:
                 curr.bindings[name] = value
                 return
             curr = curr.parent
@@ -460,9 +550,181 @@ class Environment:
 
 
 # ==========================================
-# 5. 評価器 (Evaluator - 行番号付きエラーハンドリング)
+# 4B. 分割代入と辞書構築の補助関数
+# ==========================================
+def _assign_destructured(target, val, env):
+    if isinstance(target, list):
+        if not isinstance(val, (list, tuple)):
+            val = [val]
+        for i, t in enumerate(target):
+            v_val = val[i] if i < len(val) else None
+            _assign_destructured(t, v_val, env)
+    elif isinstance(target, (str, Symbol)):
+        env.set(target, val)
+    else:
+        raise TypeError(f"変数名には名前（文字列）を指定してください: {target}")
+
+
+def build_dictionary_from_tokens(items, env):
+    """
+    コロン : やアロー => を含むトークン列から辞書を構築します。
+    キーが裸の識別子（シンボル）の場合は、変数参照せず文字列リテラルとして扱います。
+    """
+    d = {}
+    i = 0
+    while i < len(items):
+        if i + 2 < len(items) and isinstance(items[i+1], Symbol) and items[i+1] in (':', '：', '=>', '->', '='):
+            k = str(items[i])
+            v = evaluate(items[i+2], env)
+            d[k] = v
+            i += 3
+        elif i + 1 < len(items):
+            k = str(items[i]) if isinstance(items[i], Symbol) else evaluate(items[i], env)
+            v = evaluate(items[i+1], env)
+            d[k] = v
+            i += 2
+        else:
+            i += 1
+    return d
+
+
+# ==========================================
+# 4C. 出力フォーマッタ & 日本語エラーメッセージ変換
+# ==========================================
+def format_display_value(val):
+    """
+    IRUMIの値を自然な日本語表記に整形します。
+    """
+    if val is None:
+        return "なし"
+    if isinstance(val, bool):
+        return "真" if val else "偽"
+    if isinstance(val, list):
+        items = [format_display_value(x) for x in val]
+        return f"（{' '.join(items)}）"
+    return str(val)
+
+
+def format_repl_value(val):
+    """REPL用の整形"""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return "真" if val else "偽"
+    if isinstance(val, list):
+        items = [format_repl_value(x) for x in val]
+        str_items = [str(x) if x is not None else "空" for x in items]
+        return f"（{' '.join(str_items)}）"
+    return str(val)
+
+
+TYPE_NAME_JA = {
+    'int': '数値（整数）',
+    'float': '数値（小数）',
+    'str': '文字列',
+    'list': 'リスト',
+    'dict': '辞書',
+    'bool': '真偽値',
+    'tuple': 'タプル',
+    'set': '集合',
+    'NoneType': 'なし（None）',
+}
+
+def ja_type_name(obj_or_name):
+    if isinstance(obj_or_name, type):
+        name = obj_or_name.__name__
+    elif isinstance(obj_or_name, str):
+        name = obj_or_name
+    else:
+        name = type(obj_or_name).__name__
+    return TYPE_NAME_JA.get(name, name)
+
+def translate_exception(e):
+    if isinstance(e, ZeroDivisionError):
+        return "0で割ることはできません。"
+    if isinstance(e, IndexError):
+        return "指定された番号はリストの範囲外です。"
+    if isinstance(e, TypeError):
+        msg = str(e)
+        if any('\u3000' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' for c in msg):
+            return msg
+
+        m = re.search(r"unsupported operand type\(s\) for ([^:]+): '([^']+)' and '([^']+)'", msg)
+        if m:
+            op, t1, t2 = m.groups()
+            return f"型が正しくありません。演算『{op}』は「{ja_type_name(t1)}」と「{ja_type_name(t2)}」の間では計算できません。"
+
+        m2 = re.search(r"can only concatenate (\w+) \(not \"(\w+)\"\) to (\w+)", msg)
+        if m2:
+            t1, t2, _ = m2.groups()
+            return f"型が正しくありません。「{ja_type_name(t1)}」には「{ja_type_name(t1)}」のみ結合できます（「{ja_type_name(t2)}」が渡されました）。"
+
+        if "not iterable" in msg:
+            m3 = re.search(r"'([^']+)' object is not iterable", msg)
+            t = m3.group(1) if m3 else "対象"
+            return f"型が正しくありません。「{ja_type_name(t)}」は繰り返し処理（リストやループ）に対応していません。"
+
+        if "not subscriptable" in msg:
+            m4 = re.search(r"'([^']+)' object is not subscriptable", msg)
+            t = m4.group(1) if m4 else "対象"
+            return f"型が正しくありません。「{ja_type_name(t)}」は『番目』や『取る』での要素取得に対応していません。"
+
+        return f"型が正しくありません: {msg}"
+    return str(e)
+
+BUILTIN_REQUIRED_ARGS = {
+    "引く": 1,
+    "掛ける": 1,
+    "割る": 2,
+    "余り": 2,
+    "整除": 2,
+    "べき乗": 2,
+    "絶対値": 1,
+    "四捨五入": 1,
+    "最大": 1,
+    "最小": 1,
+    "大": 2,
+    "小": 2,
+    "以上": 2,
+    "以下": 2,
+    "等": 2,
+    "厳密等": 2,
+    "違う": 2,
+    "かつ": 1,
+    "または": 1,
+    "ではない": 1,
+    "待つ": 1,
+    "呼ぶ": 2,
+    "番目": 2,
+    "追加": 2,
+    "長さ": 1,
+    "並び替える": 1,
+    "逆順": 1,
+    "消す": 2,
+    "取る": 2,
+    "キー一覧": 1,
+    "値一覧": 1,
+    "乱数": 2,
+    "選ぶ": 1,
+    "保存": 2,
+    "読む": 1,
+    "追記": 2,
+    "分ける": 2,
+    "つなぐ": 2,
+    "含む": 2,
+    "置き換える": 3,
+    "数値化": 1,
+    "文字化": 1,
+}
+
+
+# ==========================================
+# 5. 評価器 (Evaluator)
 # ==========================================
 def evaluate(node, env: Environment):
+    if node is None:
+        return None
+
     # 数値、真偽値
     if isinstance(node, (int, float, bool)):
         return node
@@ -478,7 +740,7 @@ def evaluate(node, env: Environment):
         # 構文キーワードならそのままシンボル文字列として扱う
         if node in SYNTAX_KEYWORDS:
             return str(node)
-        # 未定義の変数は安全にエラーにする！
+        # 未定義の変数は安全にエラーにする
         raise NameError(f"変数「{node}」が見つかりません。スペルミスがないか確認してください。")
 
     # リスト形式の式
@@ -492,14 +754,23 @@ def evaluate(node, env: Environment):
             return _evaluate_list(node, env)
         except (ReturnSignal, BreakSignal, ContinueSignal, SystemExit):
             raise
+        except RecursionError:
+            raise RuntimeError("再帰の深さが上限に達しました。")
         except Exception as e:
             err_msg = str(e)
+            if "再帰の深さが上限に達しました。" in err_msg:
+                raise
             if not err_msg.startswith("[エラー]"):
-                raise RuntimeError(f"[エラー] {line_num}行目: {err_msg}")
+                translated = translate_exception(e)
+                raise RuntimeError(f"[エラー] {line_num}行目: {translated}")
             raise
 
 
 def _evaluate_list(node, env: Environment):
+    # 辞書糖衣構文の検出 (名前: "アリス" 等)
+    if any(isinstance(x, Symbol) and x in (':', '：', '=>', '->', '=') for x in node):
+        return build_dictionary_from_tokens(node, env)
+
     if len(node) > 1 and type(node[0]) is Symbol:
         head_res = resolve_cmd(node[0])
         if head_res in ("もし", "試す"):
@@ -525,30 +796,37 @@ def _evaluate_list(node, env: Environment):
     if cmd == "定義":
         args = [a for a in raw_args if not is_particle(a)]
         if len(args) == 2:
-            var_name = args[0]
-            if not isinstance(var_name, str):
-                raise TypeError(f"変数名には名前（文字列）を指定してください: {var_name}")
+            var_target = args[0]
             val = evaluate(args[1], env)
-            env.set(var_name, val)
+            _assign_destructured(var_target, val, env)
             return val
         elif len(args) >= 3:
-            # 辞書またはインスタンスの更新 (名簿 "年齢" 21 設定)
-            if isinstance(args[0], str) and env.contains(args[0]):
+            # プロパティ更新 (名簿 "年齢" 21 設定)
+            # 末尾がコマンド式でない場合のみプロパティ更新として扱う
+            last_token = args[-1]
+            is_nested_command = (type(last_token) is Symbol and (last_token in BUILTIN_COMMANDS or last_token in ALIASES or env.contains(last_token)))
+            
+            if len(args) == 3 and not is_nested_command and isinstance(args[0], (str, Symbol)) and env.contains(args[0]):
                 target_obj = env.get(args[0])
                 if isinstance(target_obj, dict):
                     k = evaluate(args[1], env)
-                    v = evaluate(args[2], env)
-                    target_obj[k] = v
-                    return v
+                    if is_dunder(str(k)):
+                        raise PermissionError(f"特殊属性「{k}」へのアクセスは禁止されています。")
+                    val = evaluate(args[2], env)
+                    target_obj[k] = val
+                    return val
                 elif isinstance(target_obj, Instance):
                     k = evaluate(args[1], env)
-                    v = evaluate(args[2], env)
-                    target_obj.set(k, v)
-                    return v
-            # カッコ省略代入 (名簿 (データ...) 辞書 覚える)
-            var_name = args[0]
+                    if is_dunder(str(k)):
+                        raise PermissionError(f"特殊属性「{k}」へのアクセスは禁止されています。")
+                    val = evaluate(args[2], env)
+                    target_obj.set(k, val)
+                    return val
+
+            # カッコ省略代入 (変数 式... 覚える)
+            var_target = args[0]
             val = evaluate(args[1:], env)
-            env.set(var_name, val)
+            _assign_destructured(var_target, val, env)
             return val
         else:
             raise ValueError("定義には「変数名」と「値」が必要です。例: (点数 80 覚える)")
@@ -559,7 +837,7 @@ def _evaluate_list(node, env: Environment):
     if cmd == "もし":
         cleaned_args = [a for a in raw_args if not (type(a) is Symbol and a in ("もし", "なら", "ちがえば", "そうでなければ", "else"))]
         if len(cleaned_args) < 2:
-            raise ValueError("『もし』には「条件式」と「合致したときの処理」が必要です。")
+            raise TypeError(f"命令『{raw_cmd}』には引数が2個必要ですが、{len(cleaned_args)}個渡されました。")
 
         cond_expr = cleaned_args[0]
         then_expr = cleaned_args[1]
@@ -612,7 +890,7 @@ def _evaluate_list(node, env: Environment):
 
         fn = UserFunction(fn_name, params, body, env)
         if len(args) >= 3:
-            env.set(fn_name, fn)
+            env.define(fn_name, fn)
         return fn
 
     # --------------------------------------------------
@@ -629,7 +907,7 @@ def _evaluate_list(node, env: Environment):
         body = as_body(raw_body)
 
         bp = Blueprint(class_name, params, body, env)
-        env.set(class_name, bp)
+        env.define(class_name, bp)
         return bp
 
     # --------------------------------------------------
@@ -638,11 +916,11 @@ def _evaluate_list(node, env: Environment):
     if cmd == "生み出す":
         clean_args = [a for a in raw_args if not is_particle(a)]
         if not clean_args:
-            raise ValueError("生み出すには対象の設計図（クラス）が必要です。")
+            raise TypeError(f"命令『{raw_cmd}』には引数が1個必要ですが、0個渡されました。")
         class_target = evaluate(clean_args[-1], env)
         init_args = [evaluate(a, env) for a in clean_args[:-1]]
         if isinstance(class_target, Blueprint):
-            return class_target.instantiate(init_args)
+            return class_target.instantiate(init_args, name=class_target.name)
         raise TypeError(f"「{clean_args[-1]}」は設計図（クラス）ではありません。")
 
     # --------------------------------------------------
@@ -684,27 +962,44 @@ def _evaluate_list(node, env: Environment):
             var_name = "番号"
             if any(type(a) is Symbol and a == "各" for a in rest_args):
                 k_idx = [i for i, a in enumerate(rest_args) if type(a) is Symbol and a == "各"][0]
-                var_name = rest_args[k_idx + 1]
-                body_expr = rest_args[k_idx + 2]
-            elif len(rest_args) >= 2 and isinstance(rest_args[0], str):
+                if k_idx + 2 < len(rest_args):
+                    var_name = rest_args[k_idx + 1]
+                    body_expr = rest_args[k_idx + 2]
+                elif k_idx - 1 >= 0 and k_idx + 1 < len(rest_args):
+                    var_name = rest_args[k_idx - 1]
+                    body_expr = rest_args[k_idx + 1]
+                else:
+                    body_expr = rest_args[-1]
+            elif len(rest_args) >= 2 and isinstance(rest_args[0], (str, Symbol)):
                 var_name = rest_args[0]
                 body_expr = rest_args[1]
             else:
                 body_expr = rest_args[0]
 
             body_list = as_body(body_expr)
-
             step = 1 if start_val <= end_val else -1
             last_res = None
-            for cur in range(start_val, end_val + step, step):
-                env.define(var_name, cur)
-                try:
-                    for stmt in body_list:
+            env_bindings = env.bindings
+            if len(body_list) == 1:
+                stmt = body_list[0]
+                for cur in range(start_val, end_val + step, step):
+                    env_bindings[var_name] = cur
+                    try:
                         last_res = evaluate(stmt, env)
-                except BreakSignal:
-                    break
-                except ContinueSignal:
-                    continue
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        continue
+            else:
+                for cur in range(start_val, end_val + step, step):
+                    env_bindings[var_name] = cur
+                    try:
+                        for stmt in body_list:
+                            last_res = evaluate(stmt, env)
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        continue
             return last_res
 
         # リスト巡回 (foreach)
@@ -716,15 +1011,27 @@ def _evaluate_list(node, env: Environment):
             body_list = as_body(body_expr)
 
             last_res = None
-            for item in list_target:
-                env.define(item_var_name, item)
-                try:
-                    for stmt in body_list:
+            env_bindings = env.bindings
+            if len(body_list) == 1:
+                stmt = body_list[0]
+                for item in list_target:
+                    env_bindings[item_var_name] = item
+                    try:
                         last_res = evaluate(stmt, env)
-                except BreakSignal:
-                    break
-                except ContinueSignal:
-                    continue
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        continue
+            else:
+                for item in list_target:
+                    env_bindings[item_var_name] = item
+                    try:
+                        for stmt in body_list:
+                            last_res = evaluate(stmt, env)
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        continue
             return last_res
 
         # 条件ループ (while)
@@ -735,14 +1042,24 @@ def _evaluate_list(node, env: Environment):
             body_list = as_body(body_expr)
 
             last_res = None
-            while bool(evaluate(cond_expr, env)):
-                try:
-                    for stmt in body_list:
+            if len(body_list) == 1:
+                stmt = body_list[0]
+                while bool(evaluate(cond_expr, env)):
+                    try:
                         last_res = evaluate(stmt, env)
-                except BreakSignal:
-                    break
-                except ContinueSignal:
-                    continue
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        continue
+            else:
+                while bool(evaluate(cond_expr, env)):
+                    try:
+                        for stmt in body_list:
+                            last_res = evaluate(stmt, env)
+                    except BreakSignal:
+                        break
+                    except ContinueSignal:
+                        continue
             return last_res
 
         # 回数ループ (for N times)
@@ -751,14 +1068,25 @@ def _evaluate_list(node, env: Environment):
         body_list = as_body(body_expr)
 
         last_res = None
-        for _ in range(int(count_val)):
-            try:
-                for stmt in body_list:
+        count_int = int(count_val)
+        if len(body_list) == 1:
+            stmt = body_list[0]
+            for _ in range(count_int):
+                try:
                     last_res = evaluate(stmt, env)
-            except BreakSignal:
-                break
-            except ContinueSignal:
-                continue
+                except BreakSignal:
+                    break
+                except ContinueSignal:
+                    continue
+        else:
+            for _ in range(count_int):
+                try:
+                    for stmt in body_list:
+                        last_res = evaluate(stmt, env)
+                except BreakSignal:
+                    break
+                except ContinueSignal:
+                    continue
         return last_res
 
     if cmd == "抜ける":
@@ -772,8 +1100,8 @@ def _evaluate_list(node, env: Environment):
     # --------------------------------------------------
     if cmd == "試す":
         args = raw_args
-        fail_kw = "失敗したら" if "失敗したら" in args else ("エラーなら" if "エラーなら" in args else None)
-        finally_kw = "かならず" if "かならず" in args else ("必ず" if "必ず" in args else ("最後に" if "最後に" in args else None))
+        fail_kw = next((a for a in args if type(a) is Symbol and a in ("失敗したら", "エラーなら")), None)
+        finally_kw = next((a for a in args if type(a) is Symbol and a in ("かならず", "必ず", "最後に")), None)
 
         def _eval_block(expr):
             if isinstance(expr, list) and expr and all(isinstance(x, list) for x in expr):
@@ -796,7 +1124,7 @@ def _evaluate_list(node, env: Environment):
         catch_expr = None
         if f_idx is not None:
             end_c_idx = fin_idx if fin_idx is not None and fin_idx > f_idx else len(args)
-            c_parts = [a for a in args[f_idx + 1:end_c_idx] if not (isinstance(a, str) and a in ("エラー", "例外"))]
+            c_parts = [a for a in args[f_idx + 1:end_c_idx] if not (type(a) is Symbol and a in ("エラー", "例外"))]
             catch_expr = c_parts if len(c_parts) > 1 else (c_parts[0] if c_parts else None)
 
         finally_expr = None
@@ -811,7 +1139,7 @@ def _evaluate_list(node, env: Environment):
                 raise
             except Exception as e:
                 if catch_expr is not None:
-                    env.set("エラー内容", str(e))
+                    env.set("エラー内容", translate_exception(e))
                     return _eval_block(catch_expr)
                 else:
                     raise e
@@ -824,6 +1152,8 @@ def _evaluate_list(node, env: Environment):
     # --------------------------------------------------
     if cmd in ("変換", "絞り込む"):
         clean_args = [a for a in raw_args if not is_particle(a)]
+        if len(clean_args) < 2:
+            raise TypeError(f"命令『{raw_cmd}』には引数が2個必要ですが、{len(clean_args)}個渡されました。")
         list_target = evaluate(clean_args[0], env)
         
         if len(clean_args) >= 3:
@@ -853,32 +1183,38 @@ def _evaluate_list(node, env: Environment):
     # --------------------------------------------------
     if cmd == "読み込む":
         args = [a for a in raw_args if not is_particle(a)]
+        if not args:
+            raise TypeError(f"命令『{raw_cmd}』には引数が1個必要ですが、0個渡されました。")
         target = evaluate(args[0], env)
-        if isinstance(target, str) and (os.path.exists(target) or os.path.exists(target + ".ir")):
-            filepath = target if os.path.exists(target) else target + ".ir"
-            with open(filepath, 'r', encoding='utf-8') as f:
-                sub_code = f.read()
-            sub_tokens = tokenize(sub_code)
-            sub_asts = parse(sub_tokens)
-            sub_res = None
-            for ast in sub_asts:
-                sub_res = evaluate(ast, env)
-            return sub_res
+
+        if isinstance(target, str):
+            resolved_path = resolve_import_path(target)
+            if resolved_path:
+                return run_file(resolved_path, env)
+
+        if env.safe_mode:
+            raise PermissionError(f"安全モード（--safe）ではPythonモジュール「{target}」の読み込みは禁止されています。")
 
         try:
             mod = importlib.import_module(str(target))
             env.set(str(target), mod)
             return mod
-        except ImportError:
-            raise FileNotFoundError(f"ファイルまたはPythonモジュール「{target}」が見つかりませんでした。")
+        except (ImportError, ValueError):
+            candidates = get_search_candidates(str(target))
+            searched_str = "\n".join(f"  - {p}" for p in candidates)
+            raise FileNotFoundError(
+                f"ファイルまたはPythonモジュール「{target}」が見つかりませんでした。\n"
+                f"探索したパス:\n{searched_str}"
+            )
 
     # --------------------------------------------------
     # 自作関数 / 設計図の実行・未定義チェック
     # --------------------------------------------------
     if isinstance(cmd, UserFunction):
         clean_args = [a for a in raw_args if not is_particle(a)]
+        disp_name = cmd.name if cmd.name != "<無名関数>" else str(raw_cmd)
         eval_args = [evaluate(a, env) for a in clean_args]
-        return cmd.call(eval_args)
+        return cmd.call(eval_args, name=disp_name)
 
     if isinstance(cmd, Blueprint):
         raise TypeError(f"設計図「{cmd.name}」は直接実行できません。「生み出す」を使ってください。")
@@ -889,6 +1225,8 @@ def _evaluate_list(node, env: Environment):
     # --- 短絡論理演算 (かつ / または) ---
     if cmd == "かつ":
         clean_args = [a for a in raw_args if not is_particle(a)]
+        if len(clean_args) < 1:
+            raise TypeError(f"命令『{raw_cmd}』には引数が1個必要ですが、0個渡されました。")
         for a in clean_args:
             if not bool(evaluate(a, env)):
                 return False
@@ -896,6 +1234,8 @@ def _evaluate_list(node, env: Environment):
 
     if cmd == "または":
         clean_args = [a for a in raw_args if not is_particle(a)]
+        if len(clean_args) < 1:
+            raise TypeError(f"命令『{raw_cmd}』には引数が1個必要ですが、0個渡されました。")
         for a in clean_args:
             if bool(evaluate(a, env)):
                 return True
@@ -905,6 +1245,12 @@ def _evaluate_list(node, env: Environment):
     # 通常組み込み関数の実行
     # --------------------------------------------------
     clean_args = [a for a in raw_args if not is_particle(a)]
+
+    if isinstance(cmd, str) and cmd in BUILTIN_REQUIRED_ARGS:
+        req_count = BUILTIN_REQUIRED_ARGS[cmd]
+        if len(clean_args) < req_count:
+            raise TypeError(f"命令『{raw_cmd}』には引数が{req_count}個必要ですが、{len(clean_args)}個しか渡されていません。")
+
     eval_args = [evaluate(a, env) for a in clean_args]
 
     # --- メソッド呼び出し (呼ぶ / 動かす) ---
@@ -912,11 +1258,14 @@ def _evaluate_list(node, env: Environment):
         target = eval_args[0]
         method_name = str(eval_args[1])
         m_args = eval_args[2:]
-        
+
+        if is_dunder(method_name):
+            raise PermissionError(f"特殊属性「{method_name}」へのアクセスは禁止されています。")
+
         if isinstance(target, Instance):
             fn = target.get(method_name)
             if isinstance(fn, UserFunction):
-                return fn.call(m_args)
+                return fn.call(m_args, name=method_name)
             raise TypeError(f"「{method_name}」は関数ではありません。")
         
         py_method = getattr(target, method_name)
@@ -926,6 +1275,16 @@ def _evaluate_list(node, env: Environment):
 
     # --- 算術・結合 ---
     elif cmd == "足す":
+        if len(eval_args) == 2:
+            a, b = eval_args[0], eval_args[1]
+            a_type, b_type = type(a), type(b)
+            if a_type is int and b_type is int:
+                return a + b
+            if a_type is str or b_type is str:
+                return str(a) + str(b)
+            if a_type is list and b_type is list:
+                return a + b
+            return a + b
         if not eval_args:
             return 0
         res = eval_args[0]
@@ -939,7 +1298,9 @@ def _evaluate_list(node, env: Environment):
         return res
 
     elif cmd == "引く":
-        if len(eval_args) == 1:
+        if len(eval_args) == 2:
+            return eval_args[0] - eval_args[1]
+        elif len(eval_args) == 1:
             return -eval_args[0]
         res = eval_args[0]
         for x in eval_args[1:]:
@@ -947,12 +1308,16 @@ def _evaluate_list(node, env: Environment):
         return res
 
     elif cmd == "掛ける":
+        if len(eval_args) == 2:
+            return eval_args[0] * eval_args[1]
         res = eval_args[0]
         for x in eval_args[1:]:
             res = res * x
         return res
 
     elif cmd == "割る":
+        if len(eval_args) == 2:
+            return eval_args[0] / eval_args[1]
         res = eval_args[0]
         for x in eval_args[1:]:
             res = res / x
@@ -961,7 +1326,61 @@ def _evaluate_list(node, env: Environment):
     elif cmd == "余り":
         return eval_args[0] % eval_args[1]
 
+    elif cmd == "整除":
+        res = eval_args[0]
+        for x in eval_args[1:]:
+            res = res // x
+        return res
+
+    elif cmd == "べき乗":
+        res = eval_args[0]
+        for x in eval_args[1:]:
+            res = res ** x
+        return res
+
+    elif cmd == "絶対値":
+        return abs(eval_args[0])
+
+    elif cmd == "四捨五入":
+        if len(eval_args) >= 2:
+            return round(eval_args[0], int(eval_args[1]))
+        return round(eval_args[0])
+
+    elif cmd == "最大":
+        if len(eval_args) == 1 and isinstance(eval_args[0], (list, tuple)):
+            return max(eval_args[0])
+        return max(eval_args)
+
+    elif cmd == "最小":
+        if len(eval_args) == 1 and isinstance(eval_args[0], (list, tuple)):
+            return min(eval_args[0])
+        return min(eval_args)
+
     # --- 比較 ---
+    elif cmd == "等":
+        a, b = eval_args[0], eval_args[1]
+        if a == b:
+            return True
+        if isinstance(a, (int, float, str)) and isinstance(b, (int, float, str)) and not isinstance(a, bool) and not isinstance(b, bool):
+            return str(a) == str(b)
+        return False
+
+    elif cmd == "厳密等":
+        a, b = eval_args[0], eval_args[1]
+        if a == b and type(a) is type(b):
+            return True
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
+            return a == b
+        return False
+
+    elif cmd == "違う":
+        a, b = eval_args[0], eval_args[1]
+        if a == b:
+            return False
+        if isinstance(a, (int, float, str)) and isinstance(b, (int, float, str)) and not isinstance(a, bool) and not isinstance(b, bool):
+            return str(a) != str(b)
+        return True
+
     elif cmd == "大":
         return eval_args[0] > eval_args[1]
     elif cmd == "小":
@@ -970,37 +1389,19 @@ def _evaluate_list(node, env: Environment):
         return eval_args[0] >= eval_args[1]
     elif cmd == "以下":
         return eval_args[0] <= eval_args[1]
-    elif cmd == "等":
-        a, b = eval_args[0], eval_args[1]
-        if a == b:
-            return True
-        if isinstance(a, (int, float, str)) and isinstance(b, (int, float, str)):
-            return str(a) == str(b)
-        return False
-    elif cmd == "違う":
-        a, b = eval_args[0], eval_args[1]
-        if a == b:
-            return False
-        if isinstance(a, (int, float, str)) and isinstance(b, (int, float, str)):
-            return str(a) != str(b)
-        return True
 
     # --- 論理演算 ---
-    elif cmd == "かつ":
-        return all(bool(x) for x in eval_args)
-    elif cmd == "または":
-        return any(bool(x) for x in eval_args)
     elif cmd == "ではない":
         return not bool(eval_args[0])
 
     # --- 入出力 ---
     elif cmd == "書く":
-        output = " ".join(str(x) for x in eval_args)
+        output = " ".join(format_display_value(x) for x in eval_args)
         print(output)
         return output
 
     elif cmd == "ログ":
-        output = " ".join(str(x) for x in eval_args)
+        output = " ".join(format_display_value(x) for x in eval_args)
         print(f"［ログ］ {output}")
         return output
 
@@ -1053,8 +1454,10 @@ def _evaluate_list(node, env: Environment):
 
     # --- 辞書（連想配列 / オブジェクト） ---
     elif cmd == "辞書":
-        d = {}
+        if any(isinstance(x, Symbol) and x in (':', '：', '=>', '->', '=') for x in raw_args):
+            return build_dictionary_from_tokens(raw_args, env)
         items = eval_args[0] if (len(eval_args) == 1 and isinstance(eval_args[0], list)) else eval_args
+        d = {}
         if items and all(isinstance(x, list) and len(x) == 2 for x in items):
             for k, v in items:
                 d[k] = v
@@ -1070,6 +1473,8 @@ def _evaluate_list(node, env: Environment):
     elif cmd == "取る":
         target = eval_args[0]
         key = eval_args[1]
+        if is_dunder(str(key)):
+            raise PermissionError(f"特殊属性「{key}」へのアクセスは禁止されています。")
         if isinstance(target, dict):
             return target.get(key)
         elif isinstance(target, Instance):
@@ -1095,6 +1500,8 @@ def _evaluate_list(node, env: Environment):
 
     # --- ファイル操作 ---
     elif cmd == "保存":
+        if env.safe_mode:
+            raise PermissionError("安全モード（--safe）ではファイルの保存（書き込み）は禁止されています。")
         filename = str(eval_args[0])
         content = str(eval_args[1])
         with open(filename, 'w', encoding='utf-8') as f:
@@ -1102,11 +1509,15 @@ def _evaluate_list(node, env: Environment):
         return True
 
     elif cmd == "読む":
+        if env.safe_mode:
+            raise PermissionError("安全モード（--safe）ではファイルの読み込みは禁止されています。")
         filename = str(eval_args[0])
         with open(filename, 'r', encoding='utf-8') as f:
             return f.read()
 
     elif cmd == "追記":
+        if env.safe_mode:
+            raise PermissionError("安全モード（--safe）ではファイルへの追記は禁止されています。")
         filename = str(eval_args[0])
         content = str(eval_args[1])
         with open(filename, 'a', encoding='utf-8') as f:
@@ -1153,10 +1564,19 @@ def _evaluate_list(node, env: Environment):
 
     # --- 制御・終了 ---
     elif cmd == "おわり":
-        msg = eval_args[0] if eval_args else None
+        code = 0
+        msg = None
+        if len(eval_args) == 1:
+            if isinstance(eval_args[0], int):
+                code = eval_args[0]
+            else:
+                msg = str(eval_args[0])
+        elif len(eval_args) >= 2:
+            msg = str(eval_args[0])
+            code = int(eval_args[1])
         if msg:
             print(msg)
-        sys.exit(0)
+        sys.exit(code)
 
     # --- 時間 ---
     elif cmd == "いま":
@@ -1164,6 +1584,8 @@ def _evaluate_list(node, env: Environment):
 
     # --- 外部呼出 (Python直接呼出) ---
     elif cmd == "外部呼出":
+        if env.safe_mode:
+            raise PermissionError("安全モード（--safe）では外部呼出（Python関数の実行）は禁止されています。")
         mod_name = str(eval_args[0])
         fn_name = str(eval_args[1])
         call_args = eval_args[2:]
@@ -1176,7 +1598,6 @@ def _evaluate_list(node, env: Environment):
         return py_fn(*call_args)
 
     else:
-        # 末尾が命令でない値（数値・文字列等）の場合は、二重評価せずにデータリストとして返す
         return eval_args + [evaluate(raw_cmd, env)]
 
 
@@ -1192,18 +1613,99 @@ TEMPLATE_CODE = """# ============================================
 （"こんにちは、IRUMI！" を 書く）
 
 （名前 （"あなたのお名前は？: " 聞く） 覚える）
-（（"ようこそ、" 名前 足す "さん！" 足す） 書く）
+（（"ようこそ、" 名前 "さん！" 足す） 書く）
 """
 
-def run_code(code: str, env=None):
+def run_file(filepath: str, env=None, safe_mode=None):
+    """
+    指定されたIRUMIファイルを読み込み、循環インポートチェックを行いながら実行します。
+    """
+    abs_path = os.path.abspath(filepath)
+    if abs_path in IMPORT_STACK:
+        cycle_chain = " -> ".join(IMPORT_STACK + [abs_path])
+        raise RuntimeError(f"循環インポート（循環読み込み）が検出されました: {cycle_chain}")
+
+    if not os.path.isfile(abs_path):
+        raise FileNotFoundError(f"ファイル「{filepath}」が見つかりませんでした。")
+
+    with open(abs_path, 'r', encoding='utf-8') as f:
+        code = f.read()
+
+    IMPORT_STACK.append(abs_path)
+    try:
+        return run_code(code, env, safe_mode=safe_mode)
+    finally:
+        IMPORT_STACK.pop()
+
+
+def run_code(code: str, env=None, safe_mode=None):
     if env is None:
-        env = Environment()
+        env = Environment(safe_mode=safe_mode)
+    elif safe_mode is not None:
+        env.safe_mode = safe_mode
     tokens = tokenize(code)
     ast_list = parse(tokens)
     result = None
-    for ast in ast_list:
-        result = evaluate(ast, env)
+    try:
+        for ast in ast_list:
+            result = evaluate(ast, env)
+    except RecursionError:
+        raise RuntimeError("再帰の深さが上限に達しました。")
     return result
+
+
+def has_unclosed_brackets(code: str) -> bool:
+    i = 0
+    n = len(code)
+    depth = 0
+
+    while i < n:
+        ch = code[i]
+
+        # コメント
+        if ch in ('#', '＃'):
+            while i < n and code[i] != '\n':
+                i += 1
+            continue
+
+        # 文字列リテラル
+        if ch in ('"', '”', '“'):
+            quote_char = ch
+            i += 1
+            while i < n:
+                c = code[i]
+                if c == '\\' and i + 1 < n:
+                    i += 2
+                    continue
+                if (quote_char == '"' and c == '"') or (quote_char in ('”', '“') and c in ('”', '“')):
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        # カッコ
+        if ch in ('(', '（'):
+            depth += 1
+        elif ch in (')', '）'):
+            depth -= 1
+
+        i += 1
+
+    return depth > 0
+
+
+def is_suppressed_repl_command(ast_node):
+    """REPLにおいて出力を抑制すべきトップレベルコマンドかを判定します"""
+    if isinstance(ast_node, list) and ast_node:
+        tail = ast_node[-1]
+        resolved = resolve_cmd(tail) if type(tail) is Symbol else None
+        if resolved in ("書く", "ログ", "定義", "設定", "おぼえる", "覚える"):
+            return True
+        head = ast_node[0]
+        resolved_h = resolve_cmd(head) if type(head) is Symbol else None
+        if resolved_h in ("定義", "設定", "おぼえる", "覚える"):
+            return True
+    return False
 
 
 def start_repl():
@@ -1218,32 +1720,38 @@ def start_repl():
     
     while True:
         try:
-            prompt = "irumi> " if not buffer else " ...>  "
+            prompt = "irumi> " if not buffer else "... "
             line = input(prompt)
             
             # 空行判定（バッファが空のときはスキップ）
             if not buffer and not line.strip():
                 continue
-            if not buffer and line.strip() in ("exit", "終了", "quit"):
+            if not buffer and line.strip() in ("exit", "終了", "quit", "おわり"):
                 print("またね！")
                 break
                 
             buffer.append(line)
             full_code = "\n".join(buffer)
             
-            # カッコの深さを確認（まだ閉じていなければ次の行を待つ）
-            open_count = sum(full_code.count(c) for c in ('(', '（'))
-            close_count = sum(full_code.count(c) for c in (')', '）'))
-            
-            if open_count > close_count:
+            # カッコの深さを確認（未終了なら継続）
+            if has_unclosed_brackets(full_code):
                 continue
             
             # 実行
             code_to_run = full_code
             buffer = []
-            res = run_code(code_to_run, env)
-            if res is not None:
-                print(f"=> {res}")
+            tokens = tokenize(code_to_run)
+            ast_list = parse(tokens)
+            res = None
+            last_ast = ast_list[-1] if ast_list else None
+            for ast in ast_list:
+                res = evaluate(ast, env)
+
+            # 最上位コマンドが「書く」「定義」等でなければ結果を表示
+            if not is_suppressed_repl_command(last_ast):
+                formatted = format_repl_value(res)
+                if formatted is not None:
+                    print(f"=> {formatted}")
         except KeyboardInterrupt:
             print("\n（入力をキャンセルしました）")
             buffer = []
@@ -1267,12 +1775,15 @@ def show_help():
   irumi -c <コード>                       : 1行コードを即座に実行 (Eval inline code)
   irumi -v / --version / バージョン       : バージョンを表示 (Show version)
   irumi -h / --help / 使い方              : このヘルプを表示 (Show help)
+  irumi --safe <ファイル名>               : 制限実行モードで実行 (Run in safe mode)
 """)
 
 
 def main():
-    args = sys.argv[1:]
-    
+    raw_args = sys.argv[1:]
+    safe_mode = is_safe_mode_active()
+    args = [a for a in raw_args if a != "--safe"]
+
     # 引数なし: 対話モード起動
     if not args:
         start_repl()
@@ -1299,10 +1810,11 @@ def main():
     if first in ("-c", "-e", "eval") and len(args) >= 2:
         inline_code = args[1]
         try:
-            env = Environment()
+            env = Environment(safe_mode=safe_mode)
             run_code(inline_code, env)
         except Exception as e:
-            print(e)
+            sys.stderr.write(f"{e}\n")
+            sys.exit(1)
         return
 
     # 新規ファイル作成 (new / 作る / 新規)
@@ -1311,11 +1823,11 @@ def main():
         if not target_name.endswith(".ir"):
             target_name += ".ir"
         if os.path.exists(target_name):
-            print(f"[エラー] ファイル「{target_name}」は既に存在します。")
-            return
+            sys.stderr.write(f"[エラー] ファイル「{target_name}」は既に存在します。\n")
+            sys.exit(1)
         with open(target_name, 'w', encoding='utf-8') as f:
             f.write(TEMPLATE_CODE)
-        print(f"✨ 新しいIRUMIファイルを作成しました: {target_name}")
+        print(f"新しいIRUMIファイルを作成しました: {target_name}")
         print(f"実行方法: irumi {target_name}")
         return
 
@@ -1323,16 +1835,16 @@ def main():
     filename = args[1] if (first in ("run", "実行") and len(args) >= 2) else first
 
     try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            code = f.read()
-        env = Environment()
-        run_code(code, env)
+        env = Environment(safe_mode=safe_mode)
+        run_file(filename, env)
     except FileNotFoundError:
-        print(f"[エラー] ファイル「{filename}」が見つかりませんでした。")
-    except SystemExit:
-        pass
+        sys.stderr.write(f"[エラー] ファイル「{filename}」が見つかりませんでした。\n")
+        sys.exit(1)
+    except SystemExit as se:
+        sys.exit(se.code)
     except Exception as e:
-        print(e)
+        sys.stderr.write(f"{e}\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
