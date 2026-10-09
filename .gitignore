@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Node / VS Code Extension
+node_modules/
+*.vsix
+
+# macOS
+.DS_Store
+
+# Nested git repo
+homebrew-irumi/
+
+# Temporary / test files
+*.tmp
+*_save.txt
+

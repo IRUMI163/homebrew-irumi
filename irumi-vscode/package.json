@@ -1,0 +1,53 @@
+{
+  "name": "irumi-language",
+  "displayName": "IRUMI Language Support",
+  "description": "日本語語順スクリプト言語「IRUMI」の公式VS Code拡張機能。シンタックスハイライト・コード補完・スニペット・実行機能を提供します。",
+  "version": "1.0.1",
+  "publisher": "irumi",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IRUMI163/homebrew-irumi.git"
+  },
+  "icon": "icon_v2.png",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "keywords": [
+    "irumi",
+    "japanese",
+    "lisp",
+    "programming language"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "irumi",
+        "aliases": ["IRUMI", "irumi", "イルミ"],
+        "extensions": [".ir", ".irumi"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icon_v2.png",
+          "dark": "./icon_v2.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "irumi",
+        "scopeName": "source.irumi",
+        "path": "./syntaxes/irumi.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "irumi",
+        "path": "./snippets/irumi.json"
+      }
+    ]
+  }
+}

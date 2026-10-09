@@ -1,0 +1,87 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "IRUMI",
+  "scopeName": "source.irumi",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#operators" },
+    { "include": "#particles" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.irumi",
+          "match": "(#|＃).*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.irumi",
+          "begin": "(\"|”|“)",
+          "end": "(\"|”|“)",
+          "patterns": [
+            {
+              "name": "constant.character.escape.irumi",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.irumi",
+          "match": "([0-9０-９]+(\\.[0-9０-９]+)?(回)?)"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.irumi",
+          "match": "(定義|定|設定|おぼえる|覚える|もし|なら|ちがえば|そうでなければ|else|if|順に|実行|まとめて|ブロック|関数|手順|やり方|作る|def|fn|返す|戻す|return|繰り返す|くりかえす|ループ|loop|間|あいだ|抜ける|break|次へ|continue|試す|試みる|やってみる|失敗したら|エラーなら|かならず|必ず|最後に|設計図|クラス|ひな形|class|生み出す|新規|new|読み込む|読込|つかう|使う|取り込む|参照|インポート|import|おわり|終了|やめる|停止|exit|quit)"
+        },
+        {
+          "name": "entity.name.function.irumi",
+          "match": "(書く|出す|表示|出力|print|ログ|記録|残す|聞く|尋ねる|入力|input|待つ|待機|sleep|呼ぶ|呼び出す|メソッド呼出|動かす|変換|すべて|一括変換|map|絞り込む|絞り込み|抽出|filter|リスト|配列|一覧|番目|目|番|追加|足すリスト|長さ|件数|個数|サイズ|並び替える|整列|ソート|逆順|ひっくり返す|消す|削除|取り除く|辞書|連想配列|マップ|オブジェクト|取る|取得|キー値|キー一覧|値一覧|乱数|ランダム|サイコロ|選ぶ|抽選|おみくじ|保存|書き込む|保存する|読む|読み出し|開く|追記|分ける|分割|つなぐ|連結|含む|入っている|置き換える|置換|文字数|数値化|整数化|数値|int|文字化|文字列化|文字|str|いま|現在|今|外部呼出|外部|python)"
+        },
+        {
+          "name": "constant.language.boolean.irumi",
+          "match": "(True|False|真|偽|はい|いいえ|正しい|None|無|空)"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.irumi",
+          "match": "(足す|たす|足|\\+|結合|合体|くっつける|つなげる|引く|ひく|引|\\-|掛ける|かける|掛|\\*|×|割る|わる|割|\\/|÷|整除|//|べき乗|\\*\\*|\\^|余り|あまり|%|絶対値|abs|四捨五入|round|最大|max|最小|min|大|大きい|より大きい|>|小|小さい|より小さい|<|以上|>=|以下|<=|等|同じ|等しい|==|厳密等|===|違う|異|等しくない|!=|かつ|and|&&|または|or|\\|\\||ではない|not|反転|否定)"
+        }
+      ]
+    },
+    "particles": {
+      "patterns": [
+        {
+          "name": "storage.modifier.irumi",
+          "match": "(の各要素を|各要素|の中から|を|に|へ|と|で|は|の|から|まで|各)"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.irumi",
+          "match": "[^\\s()（）\"”＃#;]+"
+        }
+      ]
+    }
+  }
+}

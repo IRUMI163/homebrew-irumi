@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irumi"
+version = "1.0.0"
+authors = [
+  { name = "IRUMI Project" },
+]
+description = "日本語語順スクリプト言語 IRUMI (イルミ)"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Interpreters",
+]
+
+[project.scripts]
+irumi = "irumi:main"
